@@ -1,19 +1,17 @@
-name: Build and Push Multi-Arch OCI Image
+name: Build and Push Multi-Arch OCI Image (JFrog CLI)
 
 on:
-  # Triggers the workflow when code is pushed to the 'master' branch
   push:
     branches:
       - master
-  # Allows manual execution from the GitHub Actions tab
   workflow_dispatch:
 
 env:
-  # The Artifactory URL is pulled from the GitHub Secret
-  ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }} 
+  # This uses the Public IP you set in the ARTIFACTORY_URL secret.
+  ARTIFACTORY_ADDRESS: ${{ secrets.ARTIFACTORY_URL }} 
+  
   # YOUR OCI repository key
   OCI_REPO: pratham-oci-oc-local 
-  # The name you want for your OCI image
   IMAGE_NAME: my-multiarch-app
   IMAGE_TAG: latest
 
@@ -30,44 +28,40 @@ jobs:
       - name: 🛠️ Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: 🔑 Log in to Artifactory using Secrets
-        # Uses your ARTIFACTORY_URL, ARTIFACTORY_USER, and ARTIFACTORY_TOKEN secrets
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.ARTIFACTORY_URL }}
-          username: ${{ secrets.ARTIFACTORY_USER }}
-          password: ${{ secrets.ARTIFACTORY_TOKEN }}
+      - name: ⚙️ Setup JFrog CLI and Configuration
+        # This step loads the JF_ARTIFACTORY_CONFIG secret for authentication.
+        uses: jfrog/setup-jfrog-cli@v3
+        env:
+          JF_ARTIFACTORY: ${{ secrets.JF_ARTIFACTORY_CONFIG }}
 
-      - name: ⚙️ Build and Push Multi-Architecture Image (Initial Push)
-        # Builds for linux/amd64 and linux/arm64 and pushes both plus the manifest list
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          # Target path: 172.16.12.242:8082/pratham-oci-oc-local/my-multiarch-app:latest
-          tags: ${{ env.ARTIFACTORY_URL }}/${{ env.OCI_REPO }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          push: true
+      - name: 🚀 Build and Push Multi-Architecture Image (Initial Push)
+        run: |
+          # The full target path uses the public address from secrets
+          FULL_IMAGE_TAG="${{ env.ARTIFACTORY_ADDRESS }}/${{ env.OCI_REPO }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+
+          # 1. Build the multi-arch image using Docker Buildx
+          # We build to a local tar file to manage the push via JFrog CLI
+          docker buildx build --platform linux/amd64,linux/arm64 --tag $FULL_IMAGE_TAG --output=type=docker,dest=/tmp/output.tar .
+          
+          # 2. Load the build output back into the local Docker daemon
+          docker load --input /tmp/output.tar
+          
+          # 3. Use JFrog CLI to push the multi-arch image (Initial Upload)
+          echo "Initial Push of Multi-Arch Image with JFrog CLI..."
+          jf rt docker-push $FULL_IMAGE_TAG ${{ env.OCI_REPO }}
 
       - name: 🏷️ Re-Push the same image with a new tag (Replication Test)
-        # Tests Artifactory's layer deduplication capability
         run: |
-          FULL_IMAGE_PATH="${{ env.ARTIFACTORY_URL }}/${{ env.OCI_REPO }}/${{ env.IMAGE_NAME }}"
+          FULL_IMAGE_PATH="${{ env.ARTIFACTORY_ADDRESS }}/${{ env.OCI_REPO }}/${{ env.IMAGE_NAME }}"
           NEW_TAG="retest-tag"
           
-          echo "--- Starting Replication Check ---"
-          
-          # 1. Pull the existing image manifest to get a local reference
-          echo "Pulling manifest for original tag (${{ env.IMAGE_TAG }})..."
-          docker pull $FULL_IMAGE_PATH:${{ env.IMAGE_TAG }}
-          
-          # 2. Tag the local image with a new tag
+          # 1. Tag the existing multi-arch image with a new tag
           echo "Tagging image with new tag: ${NEW_TAG}"
-          docker tag $FULL_IMAGE_PATH:${{ env.IMAGE_TAG }} $FULL_IMAGE_PATH:${NEW_TAG}
+          jf rt docker-tag $FULL_IMAGE_PATH:${{ env.IMAGE_TAG }} $FULL_IMAGE_PATH:${NEW_TAG}
           
-          # 3. Push the new tag and OBSERVE THE LOGS HERE
-          echo "Pushing new tag (${NEW_TAG})..."
-          echo "Expected Result: Layers should be skipped (deduplicated) by Artifactory."
-          docker push $FULL_IMAGE_PATH:${NEW_TAG}
+          # 2. Push the new tag and OBSERVE THE LOGS HERE
+          echo "Pushing new tag (${NEW_TAG}) with JFrog CLI..."
+          echo "Expected Result: Artifactory will only upload the manifest/metadata."
+          jf rt docker-push $FULL_IMAGE_PATH:${NEW_TAG} ${{ env.OCI_REPO }}
           
-          echo "--- REPLICATION CHECK COMPLETE ---"
-          echo "Review the output above. If the layer uploads were skipped, Artifactory is deduplicating correctly."
+          echo "--- REPLICATION CHECK COMPLETE: Review logs for layer skipping confirmation. ---"
